@@ -1,0 +1,287 @@
+---
+title: "Untitled"
+author: "Michael Everhart"
+date: "2024-06-26"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, message = FALSE}
+# Load necessary libraries
+library(dplyr)
+library(glmnet)
+library(rsample)
+library(caret)
+library(tidyverse)
+library(tidymodels)
+library(ggplot2)
+library(reshape2)
+#library(mice)
+#library(VIM)
+library(ranger)
+library(RColorBrewer)
+library(rpart)
+library(rattle)
+library(randomForest) #also for random forests
+library(caret)
+library(skimr)
+library(GGally)
+library(gridExtra)
+library(corrplot)
+library(rpart.plot)
+```
+
+```{r Data, message = FALSE}
+# Load data
+data <- read_csv("C:/Users/M89587/OneDrive - NGC/UNCW/BAN 502 Predictive Analytics/ames_student-1.csv")
+```
+```{r}
+data_charts = data
+data_charts[] <- lapply(data_charts, function(x) if(is.character(x)) as.factor(x) else x)
+
+# Handle missing values by removing rows with NA values for simplicity
+data_charts <- na.omit(data)
+
+# Convert Above_Median to a binary numeric variable for easier visualization
+data_charts$Above_Median <- ifelse(data_charts$Above_Median == "Yes", 1, 0)
+
+# Visualizations for numerical variables
+numerical_vars <- sapply(data_charts, is.numeric)
+
+# Correlation heatmap for numerical variables
+cor_matrix <- cor(data_charts[, numerical_vars])
+melted_cor_matrix <- melt(cor_matrix)
+ggplot(data = melted_cor_matrix, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1, 1), space = "Lab", 
+                       name="Correlation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1)) +
+  coord_fixed() +
+  ggtitle("Correlation Heatmap of Numerical Variables")
+
+# Scatter plots for numerical variables against Above_Median
+num_vars <- names(data_charts)[numerical_vars]
+num_vars <- setdiff(num_vars, "Above_Median")  # Remove Above_Median from the list
+
+for (var in num_vars) {
+  print(
+    ggplot(data_charts, aes_string(x = var, y = "Above_Median")) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "lm", col = "red") +
+      theme_minimal() +
+      ggtitle(paste("Scatter Plot of", var, "vs Above_Median"))
+  )
+
+}
+```
+```{r}
+# Visualizations for categorical variables
+categorical_vars <- names(data_charts)[!numerical_vars]
+
+for (var in categorical_vars) {
+  print(
+    ggplot(data_charts, aes_string(x = var, fill = "factor(Above_Median)")) +
+      geom_bar(position = "fill") +
+      theme_minimal() +
+      ggtitle(paste("Bar Plot of", var, "vs Above_Median")) +
+      ylab("Proportion") +
+      labs(fill = "Above_Median")
+  )
+}
+```
+```{r Cor Matrix}
+data_cor <- data %>%
+  mutate(Above_Median = ifelse(Above_Median == "Yes", 1, 0))
+
+# Drop rows with missing values (if any)
+data_cor <- na.omit(data_cor)
+
+# Calculate correlation matrix
+cor_matrix <- cor(data_cor %>% select_if(is.numeric))
+
+# Plot correlation matrix
+corrplot(cor_matrix, method = "circle", type = "upper", tl.col = "black", tl.cex = 0.8)
+
+
+# Identify top correlated features with 'Above_Median'
+cor_with_above_median <- cor_matrix[,"Above_Median"] %>% sort(decreasing = TRUE)
+top_features <- names(cor_with_above_median[2:15])
+
+# Pair plots for top features with 'Above_Median'
+pairs(data_cor[, c(top_features, "Above_Median")], col = data_cor$Above_Median + 1, pch = 19)
+```
+
+```{r}
+print(top_features)
+```
+
+
+```{r Lasso Analysis}
+
+# Convert the 'Above_Median' categorical variable to a binary numeric format
+data_lasso <- data %>%
+  mutate(Above_Median = ifelse(Above_Median == "Yes", 1, 0))
+data_lasso <- na.omit(data_lasso)
+data_lasso <- data_lasso%>%
+  dplyr::select( Full_Bath,      Year_Built,    Gr_Liv_Area,    Garage_Cars,   Year_Remod_Add, Garage_Area,    Total_Bsmt_SF,  Fireplaces,    
+ First_Flr_SF,   TotRms_AbvGrd, Above_Median )
+```
+```{r}
+data_lasso_2 <- data%>%
+  mutate(Above_Median = ifelse(Above_Median == "Yes", 1,0))
+data_lasso_2 <- data_lasso_2%>%
+  dplyr::select( Full_Bath,      Year_Built,    Gr_Liv_Area,    Garage_Cars,   Year_Remod_Add, Garage_Area,    Total_Bsmt_SF,  Fireplaces,    
+ First_Flr_SF,   TotRms_AbvGrd, Mas_Vnr_Area,   Half_Bath,      Wood_Deck_SF,   Open_Porch_SF, Above_Median )
+```
+
+```{r}
+# Split the data into training and testing sets (70/30)
+set.seed(123)  # For reproducibility
+split <- initial_split(data_lasso, prop = 0.7, strata = Above_Median)
+train_data <- training(split)
+test_data <- testing(split)
+
+split2 <- initial_split(data_lasso_2, prop = 0.7, strata = Above_Median)
+train_data2 <- training(split2)
+test_data2 <- testing(split2)
+```
+
+```{r}
+# Prepare the data for glmnet
+x_train <- model.matrix(Above_Median ~ ., train_data)[,-1]
+y_train <- train_data$Above_Median
+x_test <- model.matrix(Above_Median ~ ., test_data)[,-1]
+y_test <- test_data$Above_Median
+
+x_train2 <- model.matrix(Above_Median ~ ., train_data2)[,-1]
+y_train2 <- train_data2$Above_Median
+x_test2 <- model.matrix(Above_Median ~ ., test_data2)[,-1]
+y_test2 <- test_data2$Above_Median
+```
+```{r}
+# Fit Lasso model using cross-validation to find the best lambda
+cv_lasso <- cv.glmnet(x_train, y_train, alpha = 1, family = "binomial")
+cv_lasso2 <- cv.glmnet(x_train2, y_train2, alpha = 1, family = "binomial")
+
+# Plot the cross-validation results
+plot(cv_lasso)
+plot(cv_lasso2)
+
+# Get the best lambda value
+best_lambda <- cv_lasso$lambda.min
+best_lambda2 <- cv_lasso2$lambda.min
+
+# Fit the final model using the best lambda
+lasso_model <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda, family = "binomial")
+lasso_model2 <- glmnet(x_train2, y_train2, alpha = 1, lambda = best_lambda2, family = "binomial")
+# Predict on the test set
+lasso_predictions <- predict(lasso_model, s = best_lambda, newx = x_test, type = "response")
+lasso_class <- ifelse(lasso_predictions > 0.5, 1, 0)
+
+lasso_predictions2 <- predict(lasso_model2, s = best_lambda2, newx = x_test2, type = "response")
+lasso_class2 <- ifelse(lasso_predictions2 > 0.5, 1, 0)
+
+# Evaluate the model
+confusion_matrix <- confusionMatrix(factor(lasso_class), factor(y_test))
+confusion_matrix2 <- confusionMatrix(factor(lasso_class2), factor(y_test2))
+# Print confusion matrix and accuracy
+print(confusion_matrix)
+print(confusion_matrix2)
+print(paste("Accuracy:", confusion_matrix$overall['Accuracy']))
+print(paste("Accuracy2:", confusion_matrix2$overall['Accuracy']))
+# Coefficients of the final model
+print(coef(lasso_model))
+print(coef(lasso_model2))
+```
+
+```{r Class Tree}
+#data_tree <- data_lasso %>%
+ # mutate(Above_Median = as.factor(ifelse(Above_Median == "Yes", "Yes", "No")))
+
+# Split the data into training and testing sets
+#set.seed(123)  # For reproducibility
+#data_split <- initial_split(data_tree, prop = 0.7, strata = Above_Median)
+#train_data <- training(data_split)
+#test_data <- testing(data_split)
+
+# Fit the classification tree model
+tree_model <- rpart(Above_Median ~ ., data = train_data, method = "class")
+
+# Plot the tree using rpart.plot
+rpart.plot(tree_model, extra = 106)
+
+# Visualize the tree using rattle
+fancyRpartPlot(tree_model, tweak=1.3)
+
+# Predict on the test data
+predictions <- predict(tree_model, test_data, type = "class")
+
+# Evaluate the model
+conf_matrix <- table(test_data$Above_Median, predictions)
+print(conf_matrix)
+
+# Calculate accuracy
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+print(paste("Accuracy:", accuracy))
+```
+
+```{r Random Forest}
+# Convert the 'Above_Median' categorical variable to a binary numeric format
+data_rf <- data_lasso %>%
+  mutate(Above_Median = as_factor(Above_Median))%>%
+  mutate(Above_Median = fct_recode(Above_Median, "No" = "0", "Yes" = "1" )) 
+
+# Drop rows with missing values (if any)
+data_rf <- na.omit(data_rf)
+
+# Split the data into training and testing sets (70/30)
+set.seed(123)  # For reproducibility
+split_rf <- initial_split(data_rf, prop = 0.7)
+train_data_rf <- training(split_rf)
+test_data_rf <- testing(split_rf)
+```
+```{r}
+# Prepare the data for modeling
+x_train <- train_data_rf %>% dplyr::select(-Above_Median)
+y_train <- train_data_rf$Above_Median
+x_test <- test_data_rf %>% dplyr::select(-Above_Median)
+y_test <- test_data_rf$Above_Median
+
+# Fit Random Forest model using randomForest library
+set.seed(123)
+rf_model <- randomForest(x = x_train, y = as.factor(y_train), ntree = 500, mtry = 3, importance = TRUE)
+
+# Predict on the test set using randomForest model
+rf_predictions <- predict(rf_model, x_test)
+
+# Evaluate the model
+confusion_matrix_rf <- confusionMatrix(rf_predictions, as.factor(y_test))
+print(confusion_matrix_rf)
+print(paste("Accuracy (randomForest):", confusion_matrix_rf$overall['Accuracy']))
+
+# Fit Random Forest model using ranger library
+set.seed(123)
+ranger_model <- ranger(Above_Median ~ ., data = train_data_rf, num.trees = 500, mtry = 3, importance = 'impurity', type="class")
+```
+```{r}
+# Predict on the test set using ranger model
+ranger_predictions <- predict(ranger_model, data = x_test)$predictions
+
+# Evaluate the model
+confusion_matrix_ranger <- confusionMatrix(as.factor(ranger_predictions), as.factor(y_test))
+print(confusion_matrix_ranger)
+print(paste("Accuracy (ranger):", confusion_matrix_ranger$overall['Accuracy']))
+
+# Variable importance using randomForest
+importance(rf_model)
+varImpPlot(rf_model)
+
+```
+
